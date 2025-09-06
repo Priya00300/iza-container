@@ -1,171 +1,295 @@
-# 🎯 Iza - Minimal Container Runtime
+# Iza Container Runtime 
 
-Iza is a minimal container runtime written in C++ that demonstrates the core concepts behind Docker, Podman, and other container technologies. It directly uses Linux kernel features like namespaces and cgroups to create isolated environments.
+A lightweight container runtime implementation in C++ that demonstrates core containerization concepts including namespaces, cgroups, overlay filesystems, and Docker-style image management.
 
-## 🚀 Current Status: Phase 1 Complete
+## Features
 
-✅ **Basic Process Isolation** - Create containers with isolated PID, mount, UTS, IPC, and network namespaces  
-✅ **Filesystem Isolation** - Custom rootfs with chroot  
-✅ **Basic Command Execution** - Run commands inside isolated containers  
+- **Container Isolation**: Process, network, filesystem, hostname, and IPC isolation using Linux namespaces
+- **Resource Management**: Memory and CPU limits via cgroups v2
+- **Image Management**: Pull and manage container images (Alpine Linux, Ubuntu)
+- **Overlay Filesystem**: Efficient layered filesystem with OverlayFS support and fallback copying
+- **Legacy Support**: Backwards compatible with custom minimal rootfs
 
-## 🛠️ Building and Running
+## System Requirements
 
-### Prerequisites
-- Linux system (WSL2 works perfectly)
-- Root privileges (required for namespaces and chroot)
-- g++ compiler with C++17 support
+- Linux system with kernel 3.18+ (for namespaces)
+- cgroups v2 support (`/sys/fs/cgroup/cgroup.controllers` exists)
+- Root privileges (required for namespaces and mounts)
+- Development tools: `g++`, `make`
+- Dependencies: `libcurl4-openssl-dev`, `libarchive-dev`
 
-### Build
-```bash
-# Clone or create the project files
-make clean && make
+## Installation
+
+### 1. Install Dependencies
+
+# Ubuntu/Debian
+sudo apt update
+sudo apt install -y build-essential libcurl4-openssl-dev libarchive-dev
+
+# Or use the automated installer
+make deps
+
+
+### 2. Build Iza
+
+
+# Build the binary
+make
 
 # Or build with debug symbols
-make debug
-```
+make build-debug
 
-### Usage
-```bash
-# Basic container with bash shell
+
+### 3. Install System-wide (Optional)
+
+
+# Install to /usr/local/bin with proper directories
+sudo make install
+
+
+## Usage
+
+### Image Management
+
+#### Pull Container Images
+
+
+# Pull Alpine Linux (minimal, ~5MB)
+sudo ./iza pull alpine:latest
+
+# Pull Ubuntu (larger, ~80MB)
+sudo ./iza pull ubuntu:latest
+
+
+#### List Downloaded Images
+
+
+sudo ./iza images
+
+
+Output:
+
+REPOSITORY          TAG       SIZE
+==========================================
+alpine              latest    5MB
+ubuntu              latest    80MB
+
+
+### Running Containers
+
+#### Basic Container Execution
+
+
+# Run interactive shell
+sudo ./iza run alpine:latest
+
+# Run specific command
+sudo ./iza run alpine:latest /bin/sh -c "ls / && hostname"
+
+# Run with different shell
+sudo ./iza run alpine:latest /bin/sh
+
+
+#### Resource-Limited Containers
+
+
+# Set memory limit
+sudo ./iza run --memory 100m alpine:latest
+
+# Set CPU limit
+sudo ./iza run --cpus 1 alpine:latest
+
+# Combined limits
+sudo ./iza run --memory 50m --cpus 0.5 ubuntu:latest python3
+
+
+#### Legacy Mode (Custom Rootfs)
+
+
+# Run without image (creates minimal custom rootfs)
 sudo ./iza run /bin/bash
 
-# Run a specific command
-sudo ./iza run /bin/ls /
 
-# Check container isolation
-sudo ./iza run /usr/bin/whoami
-```
+## Testing
 
-## 🧪 Testing Container Isolation
+### Automated Tests
 
-Once inside a container, you can verify the isolation:
 
-```bash
-# Check hostname (should be 'iza-container')
-hostname
+# Run all tests
+make test-full
 
-# Check processes (should only show container processes)
-ps aux
+# Individual test suites
+make test           # Basic functionality
+make test-pull      # Image downloading
+make test-images    # Image listing
+make test-image-run # Container execution
+make test-memory    # Resource limits
 
-# Check filesystem (should show minimal container filesystem)
-ls /
 
-# Check current user
-whoami
-```
+### Manual Testing
 
-## 🏗️ Architecture Overview
+#### 1. Container Isolation Tests
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Host System                          │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                 Iza Parent Process                    │  │
-│  │  • Parses command line arguments                     │  │
-│  │  • Sets up container environment                     │  │
-│  │  • Creates child process with clone()                │  │
-│  └───────────────────────────────────────────────────────┘  │
-│                              │                              │
-│                              ▼                              │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │              Container (Child Process)                │  │
-│  │                                                       │  │
-│  │  Namespaces:                                          │  │
-│  │  • PID - Isolated process IDs                        │  │
-│  │  • Mount - Isolated filesystem                       │  │
-│  │  • UTS - Custom hostname                             │  │
-│  │  • IPC - Isolated inter-process communication       │  │
-│  │  • Network - Isolated network stack                 │  │
-│  │                                                       │  │
-│  │  Root Filesystem: /tmp/iza_rootfs                    │  │
-│  │  • /bin/bash, /bin/ls, /usr/bin/whoami              │  │
-│  │  • /proc (mounted)                                   │  │
-│  │  • /tmp (tmpfs)                                      │  │
-│  │  • Basic /etc/passwd                                 │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
 
-## 🔍 How It Works
+# Test process isolation
+sudo ./iza run alpine:latest /bin/sh -c "ps aux"
+# Should only show container processes
 
-### 1. Process Creation with clone()
-Unlike `fork()` which creates an identical copy, `clone()` allows us to create a new process with isolated namespaces:
+# Test hostname isolation
+sudo ./iza run alpine:latest /bin/sh -c "hostname"
+# Should show: iza-container
 
-```cpp
-int clone_flags = CLONE_NEWPID |    // PID namespace
-                 CLONE_NEWNS |     // Mount namespace  
-                 CLONE_NEWUTS |    // UTS namespace (hostname)
-                 CLONE_NEWIPC |    // IPC namespace
-                 CLONE_NEWNET |    // Network namespace
-                 SIGCHLD;          // Send SIGCHLD to parent when child exits
-```
+# Test filesystem isolation
+sudo ./iza run alpine:latest /bin/sh -c "ls /"
+# Should show Alpine filesystem, not host
 
-### 2. Filesystem Isolation
-- Creates a minimal rootfs in `/tmp/iza_rootfs`
-- Uses `chroot()` to change the root directory
-- Mounts `/proc` and `/tmp` filesystems
-- Copies essential binaries and libraries
+#### 2. Network Isolation Test
 
-### 3. Namespace Isolation
-- **PID Namespace**: Container sees its own process tree starting from PID 1
-- **Mount Namespace**: Container has its own filesystem view
-- **UTS Namespace**: Container can have its own hostname
-- **IPC Namespace**: Isolated message queues, semaphores, shared memory
-- **Network Namespace**: Isolated network stack (currently no connectivity)
 
-## 🚧 Limitations (Current Phase)
+# Check network interfaces
+sudo ./iza run alpine:latest /bin/sh -c "ip addr show"
+# Should only show loopback interface
 
-- **No Network Connectivity**: Containers are isolated but can't reach the internet
-- **No Resource Limits**: No memory or CPU constraints
-- **Basic Rootfs**: Minimal filesystem with only a few binaries
-- **No Image Management**: No pulling from registries
-- **Security**: Basic implementation, not production-ready
 
-## 🗺️ Roadmap
+#### 3. Resource Limit Tests
 
-### Phase 2: Resource Control (Coming Next)
-- [ ] Memory limits using cgroups v2
-- [ ] CPU limits and scheduling
-- [ ] Command line flags: `--memory`, `--cpus`
 
-### Phase 3: Image Management
-- [ ] Download and extract container images
-- [ ] OverlayFS for layered filesystems
-- [ ] `iza pull ubuntu:latest` command
+# Install stress tool in Alpine
+sudo ./iza run alpine:latest /bin/sh -c "apk add --no-cache stress"
 
-### Phase 4: Networking
-- [ ] Virtual ethernet (veth) pairs
-- [ ] Network namespaces with connectivity
-- [ ] NAT for internet access
-- [ ] `iza run --net` flag
+# Test memory limit (should fail/be killed)
+sudo ./iza run --memory 50m alpine:latest stress --vm 1 --vm-bytes 100m --vm-hang 5
 
-## 🎓 Educational Value
+# Test CPU limit
+sudo ./iza run --cpus 0.5 alpine:latest /bin/sh -c "yes > /dev/null &"
+# Monitor with htop in another terminal
 
-This project demonstrates:
-- Linux system programming and kernel interfaces
-- Container technology fundamentals
-- Process isolation and security boundaries
-- Filesystem virtualization
-- Modern C++ development practices
+#### 4. Filesystem Layer Tests
 
-## 🤝 Contributing
 
-This is an educational project. Feel free to:
-- Experiment with the code
-- Add features from the roadmap
-- Improve error handling and robustness
-- Add more comprehensive testing
+# Create file in container
+sudo ./iza run alpine:latest /bin/sh -c "echo 'test' > /tmp/container-file && ls /tmp"
 
-## ⚠️ Security Warning
+# Check host filesystem (file should not exist)
+ls /tmp
 
-This is an educational implementation. Do not use in production environments. Container security requires careful consideration of:
-- Privilege escalation prevention
-- Resource exhaustion protection
-- Kernel vulnerability mitigation
-- Secure default configurations
 
-## 📚 References
+## Architecture
 
-- [Linux Containers from Scratch](https://ericchiang.github.io/post/containers-from-scratch/)
-- [Container Implementation Inspiration](https://github.com/joey00072/iza)
-- Linux man pages: `clone(2)`, `namespaces(7)`, `cgroups(7)`
+### Core Components
+
+1. **Arguments Parser**: Handles command-line interface and validation
+2. **ImageManager**: Downloads and manages container images
+3. **OverlayFS**: Implements layered filesystem with fallback copying
+4. **CgroupManager**: Manages resource limits via cgroups v2
+5. **Namespace Manager**: Creates isolated container environments
+
+
+### Supported Images
+
+- **Alpine Linux**: `alpine:latest` - Minimal Linux distribution (~5MB)
+- **Ubuntu**: `ubuntu:latest` - Full Ubuntu base system (~80MB)
+
+## Build System
+
+### Available Make Targets
+
+
+# Build targets
+make deps          # Install dependencies
+make all           # Build with dependencies
+make build-debug   # Debug build with symbols
+make clean         # Clean build files
+make install       # System-wide installation
+
+# Testing targets
+make test          # Basic tests
+make test-pull     # Image download tests
+make test-images   # Image listing tests
+make test-image-run # Container execution tests
+make test-memory   # Resource limit tests
+make test-full     # All tests
+
+# Utility targets
+make check-overlay # Check OverlayFS support
+make clean-all     # Remove everything including images
+make help          # Show help information
+
+
+## Troubleshooting
+
+### Common Issues
+
+#### OverlayFS Not Available
+
+
+[WARNING] OverlayFS not available, using copy fallback
+
+
+This is normal on some systems. Iza will automatically use filesystem copying as fallback.
+
+#### Permission Denied
+
+
+Failed to create container process
+
+
+Ensure you're running with `sudo`. Container operations require root privileges.
+
+#### cgroups v2 Not Available
+
+
+Error: cgroups v2 not available
+
+
+Check if your system supports cgroups v2:
+
+ls /sys/fs/cgroup/cgroup.controllers
+
+
+#### Image Not Found
+
+
+Error: Image 'myimage:latest' not found
+
+
+Pull the image first:
+
+sudo ./iza pull myimage:latest
+
+
+### Debug Information
+
+#### Check System Capabilities
+
+
+# Check OverlayFS support
+make check-overlay
+
+# Check cgroups v2
+ls -la /sys/fs/cgroup/
+
+# Check namespace support
+unshare --help
+
+
+#### Enable Debug Mode
+
+
+# Build debug version
+make build-debug
+
+# Run with verbose output
+sudo strace -f ./iza run alpine:latest /bin/sh
+
+
+## Development
+
+### Code Structure
+
+- `main.cpp`: Complete implementation with all classes
+- `Makefile`: Build system with comprehensive targets
+
+
+
+
