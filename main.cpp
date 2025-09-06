@@ -106,7 +106,7 @@ private:
         
         if (command.empty() && !image_name.empty()) {
             // Default command for images
-            command.push_back("/bin/bash");
+            command.push_back("/bin/sh");
         } else if (command.empty()) {
             std::cerr << "Error: No command specified\n";
             show_usage();
@@ -127,8 +127,8 @@ private:
     void show_usage() {
         std::cout << "🎯 Iza Container Runtime - Phase 3: Image Management\n\n"
                   << "Usage:\n"
-                  << "  iza pull IMAGE                    Download a container image\n"
-                  << "  iza images                        List downloaded images\n"
+                  << "  iza pull IMAGE                   Download a container image\n"
+                  << "  iza images                      List downloaded images\n"
                   << "  iza run [OPTIONS] IMAGE [COMMAND] Run container from image\n"
                   << "  iza run [OPTIONS] COMMAND         Run container with custom rootfs\n\n"
                   << "Options:\n"
@@ -431,114 +431,97 @@ private:
 class OverlayFS {
 private:
     std::string overlay_dir = "/var/lib/iza/overlay";
+    bool overlay_supported = false;
     
 public:
     OverlayFS() {
         std::filesystem::create_directories(overlay_dir);
+        
+        // Check if OverlayFS is supported
+        std::ifstream filesystems("/proc/filesystems");
+        std::string line;
+        while (std::getline(filesystems, line)) {
+            if (line.find("overlay") != std::string::npos) {
+                overlay_supported = true;
+                break;
+            }
+        }
     }
     
-    // Add this method to your OverlayFS class as a fallback
-    int setup_bind_mount_fallback(const std::string& image_rootfs, const std::string& container_id, std::string& container_rootfs) {
-        std::cout << "[FALLBACK] Using bind mount instead of overlay..." << std::endl;
-        
-        // Create a copy of the rootfs for this container
+    int setup_overlay(const std::string& image_rootfs, const std::string& container_id, std::string& merged_dir) {
+        // Create directories for this container
         std::string container_overlay = overlay_dir + "/" + container_id;
-        container_rootfs = container_overlay + "/rootfs";
+        std::string upper_dir = container_overlay + "/upper";
+        std::string work_dir = container_overlay + "/work";
+        merged_dir = container_overlay + "/merged";
         
-        // Clean up any existing directory
-        std::filesystem::remove_all(container_overlay);
-        std::filesystem::create_directories(container_overlay);
+        // Clean up any existing overlay
+        cleanup_overlay(container_id);
         
-        // Copy the entire image rootfs to our container directory
-        std::cout << "[FALLBACK] Copying rootfs from " << image_rootfs << " to " << container_rootfs << std::endl;
+        // Create directories
+        std::filesystem::create_directories(upper_dir);
+        std::filesystem::create_directories(work_dir);
+        std::filesystem::create_directories(merged_dir);
         
-        try {
-            std::filesystem::copy(image_rootfs, container_rootfs, 
-                                 std::filesystem::copy_options::recursive |
-                                 std::filesystem::copy_options::copy_symlinks);
-        } catch (const std::filesystem::filesystem_error& e) {
-            std::cerr << "[ERROR] Failed to copy rootfs: " << e.what() << std::endl;
+        if (overlay_supported) {
+            // Try OverlayFS first
+            std::string mount_opts = "lowerdir=" + image_rootfs +
+                                  ",upperdir=" + upper_dir +
+                                  ",workdir=" + work_dir;
+            
+            std::cout << "[OVERLAY] Mounting overlay: " << mount_opts << std::endl;
+            
+            if (mount("overlay", merged_dir.c_str(), "overlay", 0, mount_opts.c_str()) == 0) {
+                return 0; // Success!
+            } else {
+                std::cout << "[WARNING] OverlayFS mount failed, falling back to copy method" << std::endl;
+            }
+        } else {
+            std::cout << "[WARNING] OverlayFS not available, using copy fallback" << std::endl;
+        }
+        
+        // Fallback: Copy the entire rootfs
+        std::cout << "[FALLBACK] Copying rootfs from " << image_rootfs << " to " << merged_dir << std::endl;
+        
+        // Verify source exists
+        std::cout << "[FALLBACK] Verifying source exists: " << image_rootfs << std::endl;
+        if (!std::filesystem::exists(image_rootfs)) {
+            std::cerr << "[FALLBACK] Source directory does not exist!" << std::endl;
             return -1;
         }
         
-        std::cout << "[FALLBACK] Bind mount fallback setup complete" << std::endl;
-        return 0;
-    }
-    
-    bool check_overlay_support() {
-        // Check if overlay is supported in /proc/filesystems
-        std::ifstream fs_file("/proc/filesystems");
-        if (!fs_file.is_open()) {
-            return false;
-        }
-        
-        std::string line;
-        while (std::getline(fs_file, line)) {
-            if (line.find("overlay") != std::string::npos) {
-                return true;
-            }
-        }
-        return false;
-    }
-    
-    bool validate_directories(const std::string& image_rootfs, const std::string& upper_dir, 
-                            const std::string& work_dir, const std::string& merged_dir) {
-        return std::filesystem::exists(image_rootfs) &&
-               std::filesystem::exists(upper_dir) &&
-               std::filesystem::exists(work_dir) &&
-               std::filesystem::exists(merged_dir);
-    }
-    
-    // Modified setup_overlay method with fallback
-    int setup_overlay(const std::string& image_rootfs, const std::string& container_id, std::string& merged_dir) {
-        // First try the original overlay approach
-        if (check_overlay_support()) {
-            std::string container_overlay = overlay_dir + "/" + container_id;
-            std::string upper_dir = container_overlay + "/upper";
-            std::string work_dir = container_overlay + "/work";
-            merged_dir = container_overlay + "/merged";
+        try {
+            // Use filesystem::copy to recursively copy the entire directory
+            std::filesystem::copy(image_rootfs, merged_dir,
+                std::filesystem::copy_options::recursive |
+                std::filesystem::copy_options::copy_symlinks);
             
-            cleanup_overlay(container_id);
-            
-            try {
-                std::filesystem::create_directories(upper_dir);
-                std::filesystem::create_directories(work_dir);  
-                std::filesystem::create_directories(merged_dir);
-            } catch (const std::exception& e) {
-                std::cerr << "[WARNING] Failed to create overlay dirs, falling back to bind mount" << std::endl;
-                return setup_bind_mount_fallback(image_rootfs, container_id, merged_dir);
-            }
-            
-            if (validate_directories(image_rootfs, upper_dir, work_dir, merged_dir)) {
-                std::string mount_opts = "lowerdir=" + image_rootfs + 
-                                       ",upperdir=" + upper_dir + 
-                                       ",workdir=" + work_dir;
-                
-                if (mount("overlay", merged_dir.c_str(), "overlay", 0, mount_opts.c_str()) == 0) {
-                    std::cout << "[OVERLAY] Successfully mounted overlay filesystem" << std::endl;
-                    return 0;
-                }
-            }
+            std::cout << "[FALLBACK] Copy completed successfully" << std::endl;
+            return 0;
+        } catch (const std::exception& e) {
+            std::cerr << "[FALLBACK] Copy failed: " << e.what() << std::endl;
+            std::filesystem::remove_all(container_overlay);
+            return -1;
         }
-        
-        // If overlay fails, fall back to bind mount
-        std::cout << "[WARNING] OverlayFS not available, using bind mount fallback" << std::endl;
-        return setup_bind_mount_fallback(image_rootfs, container_id, merged_dir);
     }
     
     int cleanup_overlay(const std::string& container_id) {
         std::string container_overlay = overlay_dir + "/" + container_id;
         std::string merged_dir = container_overlay + "/merged";
         
-        // Unmount if mounted
+        // Unmount if it was mounted with OverlayFS
         if (std::filesystem::exists(merged_dir)) {
             if (umount(merged_dir.c_str()) != 0) {
-                // It's OK if this fails - might not be mounted
+                // It's OK if this fails - might not be mounted or might be a copy
             }
         }
         
         // Remove the entire container overlay directory
-        std::filesystem::remove_all(container_overlay);
+        try {
+            std::filesystem::remove_all(container_overlay);
+        } catch (const std::exception& e) {
+            std::cout << "[CLEANUP] Note: " << e.what() << std::endl;
+        }
         return 0;
     }
 };
@@ -753,19 +736,36 @@ int container_child(void* arg) {
         perror("Failed to set hostname");
     }
     
-    // Determine rootfs path
+    // Determine rootfs path - get it from environment variable set by parent
     std::string rootfs_path;
-    if (!args->image_name.empty()) {
-        // Use image-based rootfs (will be set up by parent)
-        rootfs_path = "/tmp/iza-container-" + std::to_string(getppid());
+    char* env_rootfs = getenv("IZA_ROOTFS_PATH");
+    if (env_rootfs != nullptr) {
+        rootfs_path = env_rootfs;
+        std::cout << "[CHILD] Using rootfs from env: " << rootfs_path << std::endl;
     } else {
-        // Use legacy rootfs
+        // Use legacy rootfs as fallback
         rootfs_path = "/tmp/iza-rootfs";
+        std::cout << "[CHILD] Using legacy rootfs: " << rootfs_path << std::endl;
     }
+    
+    // Verify the rootfs directory exists
+    if (!std::filesystem::exists(rootfs_path)) {
+        std::cerr << "[CHILD] ERROR: Rootfs directory does not exist: " << rootfs_path << std::endl;
+        return -1;
+    }
+    
+    // Verify we have access to the rootfs
+    if (access(rootfs_path.c_str(), R_OK | X_OK) != 0) {
+        perror("[CHILD] ERROR: Cannot access rootfs directory");
+        return -1;
+    }
+    
+    std::cout << "[CHILD] Changing root to: " << rootfs_path << std::endl;
     
     // Change root to our container filesystem
     if (chroot(rootfs_path.c_str()) != 0) {
         perror("Failed to chroot");
+        std::cerr << "Attempted path: " << rootfs_path << std::endl;
         return -1;
     }
     
@@ -875,6 +875,14 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
+        // Debug: Check if rootfs exists
+        std::cout << "[DEBUG] Checking if rootfs exists: " << container_rootfs << std::endl;
+        if (!std::filesystem::exists(container_rootfs)) {
+            std::cerr << "[ERROR] Rootfs directory does not exist!" << std::endl;
+            curl_global_cleanup();
+            return 1;
+        }
+        
         // Create a symlink for the child process to find
         std::string child_rootfs = "/tmp/iza-container-" + std::to_string(getpid());
         std::filesystem::remove(child_rootfs); // Remove if exists
@@ -885,6 +893,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
+        // Set environment variable for child process
+        setenv("IZA_ROOTFS_PATH", container_rootfs.c_str(), 1);
+        
     } else {
         // Use legacy custom filesystem
         if (setup_legacy_filesystem() != 0) {
@@ -893,6 +904,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         container_rootfs = "/tmp/iza-rootfs";
+        // Set environment variable for child process
+        setenv("IZA_ROOTFS_PATH", container_rootfs.c_str(), 1);
     }
     
     // Create and configure cgroup (if limits specified)
